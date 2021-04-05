@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ScalaCompilerConfiguration">
+    <profile name="sbt 1" modules="akka-quickstart-scala">
+      <option name="postfixOps" value="true" />
+    </profile>
+    <profile name="sbt 2" modules="alakka,multiverse">
+      <parameters>
+        <parameter value="-target:jvm-1.8" />
+      </parameters>
+    </profile>
+  </component>
+</project>
