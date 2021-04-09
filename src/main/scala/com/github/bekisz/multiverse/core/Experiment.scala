@@ -8,9 +8,7 @@ import org.apache.flink.table.api.bridge.scala.StreamTableEnvironment
 class Experiment extends HasMeasuredLifeTime {
 
   val env = StreamExecutionEnvironment.getExecutionEnvironment
-  val tableEnv = this.createTableEnv()
-  // register function
-  protected def createTableEnv(): StreamTableEnvironment = {
+  val tableEnv = {
     val envSettings = EnvironmentSettings.newInstance()
       .useBlinkPlanner().inStreamingMode().build()
 

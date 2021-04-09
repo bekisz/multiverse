@@ -16,7 +16,9 @@
     </appender>
     <logger name="org.apache.flink.metrics.MetricGroup" level="ERROR"/>
     <logger name="org.apache.flink.runtime.webmonitor.WebMonitorUtils" level="ERROR"/>
+    <logger name="com.github.bekisz.multiverse.core.udf.Error" level="ERROR"/>
     <logger name="com.github.bekisz.multiverse" level="DEBUG"/>
+
     <root level="WARN">
         <appender-ref ref="ASYNC"/>
     </root>

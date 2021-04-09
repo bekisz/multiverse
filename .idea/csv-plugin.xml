@@ -3,6 +3,13 @@
   <component name="CsvFileAttributes">
     <option name="attributeMap">
       <map>
+        <entry key="/src/main/scala/com/github/bekisz/multiverse/example/gw/GwExperiment.scala">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
         <entry key="/src/main/scala/org/montecarlo/Experiment.scala">
           <value>
             <Attribute>

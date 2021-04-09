@@ -29,7 +29,7 @@ class GwTrial( val maxPopulation:Long= 100, val seedNode:GwNode = new GwNode(lam
    * One more turn
    *  @return true if is has a next turn, false it was the final turn for this trial
    */
-  override def nextTurn() : Boolean = {
+  override def nextTurn() : GwTrial = {
     var nextGenNodes = List[GwNode]()
     for(node <- livingNodes) {
       val children = node.createChildren()
@@ -40,6 +40,7 @@ class GwTrial( val maxPopulation:Long= 100, val seedNode:GwNode = new GwNode(lam
     }
     this.livingNodes = nextGenNodes
     super.nextTurn()
+    this
   }
 }
 

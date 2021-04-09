@@ -12,7 +12,7 @@ import java.util.UUID
 trait Trial extends Serializable  {
 
   private var _turn = 0L
-
+  def hasNext:Boolean = !this.isFinished
   def isFinished: Boolean
   /**
    * @return turn number ~ time
@@ -23,19 +23,20 @@ trait Trial extends Serializable  {
    * Takes one turn
    * @return true if is has a next turn, false it was the final turn for this trial
    */
-  def nextTurn() : Boolean = {
+  def nextTurn() : Trial = {
     _turn +=1
-    !this.isFinished
+    this
   }
 
   /**
    * Runs the trial with 1-many turns till it gets finished
    * @return this trial
    */
-  def run() : Trial = {
-    while(this.nextTurn()) {}
-    this
-  }
+
+    def run() : Trial = {
+      while(!this.nextTurn().isFinished) {}
+      this
+    }
 
   /**
    * The universally unique id of this trial

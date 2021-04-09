@@ -2,6 +2,7 @@ package com.github.bekisz.multiverse.example.gw
 
 import com.github.bekisz.multiverse.core.Implicits._
 import com.github.bekisz.multiverse.core._
+import com.github.bekisz.multiverse.utils.While
 import org.apache.flink.streaming.api.scala.createTypeInformation
 import org.apache.flink.streaming.api.scala.extensions.acceptPartialFunctions
 
@@ -18,9 +19,11 @@ import org.apache.flink.streaming.api.scala.extensions.acceptPartialFunctions
  *                      declare our seed node as a survivor
  */
 case class GwInput(
-                    lambda: Parameter[Double] = ("1.0".toBD to "2.0".toBD by "0.05".toBD).map(_.toDouble),
-                    maxPopulation: Parameter[Long] = Seq(100L)
+                    lambda: Parameter[Double],
+                    maxPopulation: Parameter[Long] = Seq(100L),
+                    inputPlaneId: Parameter[Long]
                   ) extends Input
+
 
 /**
  * These fields are the variables that we save from the trial instances for later analysis and will be the columns
@@ -31,16 +34,20 @@ case class GwOutput(lambda: Double,
                     maxPopulation: Long,
                     seedSurvivalChance: Double,
                     turn: Long,
+                    isTurnProlonged: Boolean,
                     isFinished: Boolean,
                     nrOfSeedNodes: Int,
+                    inputPlaneId: Long,
                     trialUniqueId: String) extends Output
 
 object GwOutput extends Output {
-  def apply(t: GwTrial): GwOutput = new GwOutput(
+  def apply(t: GwTrial, inputPlaneId: Long = 0L): GwOutput = new GwOutput(
     lambda = t.seedNode.lambdaForPoisson,
     maxPopulation = t.maxPopulation,
     seedSurvivalChance = if (t.isSeedDominant) 1.0 else 0.0,
+    inputPlaneId = inputPlaneId,
     turn = t.turn(),
+    isTurnProlonged = false,
     isFinished = t.isFinished,
     nrOfSeedNodes = t.livingNodes.size,
     trialUniqueId = t.trialUniqueId
@@ -55,78 +62,70 @@ object GwOutput extends Output {
  */
 object GwExperiment {
 
+  val confidence = 0.999
+  val prolongTrialsTill = 50
+  val sinkWithClauseCommonPart =
+    """'connector'= 'jdbc', 'url'= 'jdbc:postgresql://localhost:5432/replicator',
+  'username'='multiverse', 'password'='multiverse'"""
+
+
   def main(args: Array[String]): Unit = {
 
     val exp = new Experiment
 
-    val trialOutput = exp.env
-      .addSource(new IdGenerator).name("Id Generator")
-      .flatMapWith(id => GwInput().createInputPermutations()).name("Creating Trial Inputs")
-      .mapWith { case input: GwInput =>
-        new GwTrial(input.maxPopulation,
-          seedNode = new GwNode(input.lambda))
+    val gwTrialOutput = exp.env
+      .addSource(new IdGenerator).name("Generate InputPlaneIDs")
+      .mapWith { inputPlaneId =>
+        GwInput(
+          inputPlaneId = inputPlaneId,
+          lambda = ("1.0".toBD to "2.0".toBD by "0.05".toBD).map(_.toDouble),
+          maxPopulation = Seq(100L)
+        )
+      }.name("Creating Input Planes")
+      .flatMapWith {
+        _.createInputPermutations()
+      }.name("Create Trial Inputs")
+      .mapWith {
+        case input: GwInput =>
+          (input.inputPlaneId.head(), new GwTrial(input.maxPopulation, seedNode = new GwNode(input.lambda)))
       }.name("Creating Trials")
       .flatMapWith {
-        trial =>
-          var outputList = List[GwOutput]()
-          do {
-            outputList = GwOutput(trial) :: outputList
-          } while (trial.nextTurn())
+        case (inputPlaneId, trial) => List(GwOutput(trial, inputPlaneId)) ++ While.withYield(!trial.isFinished) {
+          GwOutput(trial.nextTurn(), inputPlaneId)
+        }
+      }.name("Running Trials")
+      .flatMapWith { output =>
+        if (output.isFinished && prolongTrialsTill > output.turn)
+          for (i <- output.turn to prolongTrialsTill) yield output.copy(turn = i, isTurnProlonged = i > output.turn)
+        else Seq(output)
+      }.name("Prolong Trial Turns")
 
-          outputList = GwOutput(trial) :: outputList
-          outputList.reverse
-      }.name("Execute trial")
-
-    exp.tableEnv.createTemporaryView("TrialOutputTable", trialOutput)
+    exp.tableEnv.createTemporaryView("GwTrialOutput", gwTrialOutput)
     /*
     exp.tableEnv.executeSql("CREATE CATALOG multiverse WITH('type' = 'jdbc','default-database' = 'postgres', " +
       " 'username' = 'multiverse', 'password' = 'multiverse', 'base-url' = 'jdbc:postgresql://localhost:5432/')")
     exp.tableEnv.executeSql("USE CATALOG multiverse") */
-    val sql =
-      "CREATE TABLE SurvivalByLambda " +
-        "  (lambda DOUBLE, seedSurvivalChance DOUBLE, trials BIGINT, err DOUBLE, PRIMARY KEY (lambda) NOT ENFORCED) " +
-        "   WITH('connector'= 'jdbc', 'url'= 'jdbc:postgresql://localhost:5432/replicator', " +
-        "     'username'='multiverse', 'password'='multiverse', 'table-name' = 'SurvivalByLambda') " +
-        "INSERT INTO SurvivalByLambda SELECT lambda, AVG(seedSurvivalChance), COUNT(*), " +
-        "   ERROR(seedSurvivalChance,0.999) FROM TrialOutputTable GROUP BY lambda"
-    exp.tableEnv.executeSql(sql)
+
+    s"""
+       | CREATE TABLE `SurvivalByLambda`
+       |    (lambda DOUBLE, seedSurvivalChance DOUBLE, trials BIGINT, err DOUBLE, PRIMARY KEY (lambda) NOT ENFORCED)
+       |    WITH($sinkWithClauseCommonPart, 'table-name' = 'SurvivalByLambda');
+       | INSERT INTO SurvivalByLambda SELECT lambda, AVG(seedSurvivalChance), COUNT(*),
+       |   ERROR(seedSurvivalChance, $confidence) FROM GwTrialOutput WHERE isFinished=true AND isTurnProlonged=false
+       |   GROUP BY lambda;
+       | CREATE TABLE `SeedPopulationByTurn`
+       |    (lambda DOUBLE, turn BIGINT,seedPopulation DOUBLE,  err DOUBLE, trials BIGINT,
+       |     PRIMARY KEY (lambda, turn) NOT ENFORCED)
+       |    WITH($sinkWithClauseCommonPart, 'table-name' = 'SeedPopulationByTurn');
+       | INSERT INTO `SeedPopulationByTurn`  select lambda, turn,
+       |      avg(CAST(nrOfSeedNodes AS DOUBLE)) as seedPopulation,
+       |      error(nrOfSeedNodes, $confidence) as error,
+       |       COUNT(*) as trials
+       |      from GwTrialOutput where turn <= $prolongTrialsTill group by lambda, turn"""
+      .stripMargin.split(';').map(exp.tableEnv.executeSql(_))
+
+
     exp.env.execute("Galton-Watson Experiment")
-    //exp.tableEnv.toRetractStream[Aggregation](aggregationTable)
-
-
-    /*
-      .filterWith { case (isUpdate, _) => isUpdate }.mapWith { case (_, piAggr) => piAggr }
-      .addSink(result => println(s"Lambda : ${result.lambda} Seed Survival Chance : ${result.seedSurvivalChance} " +
-        s" Count: ${result.samples}")).name("Galton-Watson Sink")
-
-
-    val confidence = 0.99
-    val inputDimNames = experiment.input.fetchDimensions().mkString(", ")
-    val sqlSeedSurvivalChance: String = s"select $inputDimNames, count(seedSurvivalChance) as trials, " +
-      "avg(seedSurvivalChance) as seedSurvivalChance, " +
-      s"error(seedSurvivalChance, $confidence) as error " +
-      s"from ${GwOutput.name}  where isFinished==true group by $inputDimNames order by $inputDimNames"
-
-    experiment.outputRDD.toDS().createTempView(GwOutput.name)
-    val seedSurvivalChanceDF = experiment.spark.sql(sqlSeedSurvivalChance)
-    println("seedSurvivalChanceDF SQL query : " + sqlSeedSurvivalChance)
-    val prolongTrialsTill = 50 //turns
-    seedSurvivalChanceDF.show(100)
-
-    seedSurvivalChanceDF.repartition(1)
-      .write.format("csv").option("header", "true")
-      .mode(SaveMode.Overwrite).save("output/GaltonWatson_seedSurvivalChance.csv")
-    val sqlSeedPopulationByTurn: String = s"select lambda, turn, " +
-      "avg(nrOfSeedNodes) as seedPopulation, " +
-      s"error(nrOfSeedNodes, $confidence) as error " +
-      s"from ${GwOutput.name}Prolonged where turn <= $prolongTrialsTill group by lambda, turn  order by lambda, turn"
-
-    experiment.spark.table(GwOutput.name).retroActivelyProlongTrials(prolongTrialsTill)
-      .createTempView(GwOutput.name + "Prolonged")
-    val seedPopulationByTurnDF = experiment.spark.sql(sqlSeedPopulationByTurn)
-    println("seedPopulationByTurnDF SQL query : " + sqlSeedPopulationByTurn)
-
-     */
 
   }
 
