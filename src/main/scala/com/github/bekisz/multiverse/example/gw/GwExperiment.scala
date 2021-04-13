@@ -19,9 +19,10 @@ import org.apache.flink.streaming.api.scala.extensions.acceptPartialFunctions
  *                      declare our seed node as a survivor
  */
 case class GwInput(
-                    lambda: Parameter[Double],
-                    maxPopulation: Parameter[Long] = Seq(100L),
-                    inputPlaneId: Parameter[Long]
+                    inputPlaneId: Parameter[Long],
+                    lambda: Parameter[Double] = ("1.0".toBD to "2.0".toBD by "0.05".toBD).map(_.toDouble),
+                    maxPopulation: Parameter[Long] = Seq(100L)
+
                   ) extends Input
 
 
@@ -32,20 +33,20 @@ case class GwInput(
 
 case class GwOutput(lambda: Double,
                     maxPopulation: Long,
+                    inputPlaneId:Long,
                     seedSurvivalChance: Double,
                     turn: Long,
                     isTurnProlonged: Boolean,
                     isFinished: Boolean,
                     nrOfSeedNodes: Int,
-                    inputPlaneId: Long,
                     trialUniqueId: String) extends Output
 
 object GwOutput extends Output {
-  def apply(t: GwTrial, inputPlaneId: Long = 0L): GwOutput = new GwOutput(
-    lambda = t.seedNode.lambdaForPoisson,
-    maxPopulation = t.maxPopulation,
+  def apply(i:GwInput, t: GwTrial): GwOutput = new GwOutput(
+    lambda = i.lambda,
+    maxPopulation = i.maxPopulation,
+    inputPlaneId = i.inputPlaneId,
     seedSurvivalChance = if (t.isSeedDominant) 1.0 else 0.0,
-    inputPlaneId = inputPlaneId,
     turn = t.turn(),
     isTurnProlonged = false,
     isFinished = t.isFinished,
@@ -76,22 +77,18 @@ object GwExperiment {
     val gwTrialOutput = exp.env
       .addSource(new IdGenerator).name("Generate InputPlaneIDs")
       .mapWith { inputPlaneId =>
-        GwInput(
-          inputPlaneId = inputPlaneId,
-          lambda = ("1.0".toBD to "2.0".toBD by "0.05".toBD).map(_.toDouble),
-          maxPopulation = Seq(100L)
-        )
+        GwInput(inputPlaneId=inputPlaneId)
       }.name("Creating Input Planes")
       .flatMapWith {
         _.createInputPermutations()
       }.name("Create Trial Inputs")
       .mapWith {
         case input: GwInput =>
-          (input.inputPlaneId.head(), new GwTrial(input.maxPopulation, seedNode = new GwNode(input.lambda)))
+          (input, new GwTrial(input.maxPopulation, seedNode = new GwNode(input.lambda)))
       }.name("Creating Trials")
       .flatMapWith {
-        case (inputPlaneId, trial) => List(GwOutput(trial, inputPlaneId)) ++ While.withYield(!trial.isFinished) {
-          GwOutput(trial.nextTurn(), inputPlaneId)
+        case (input, trial) => List(GwOutput(input, trial)) ++ While.withYield(!trial.isFinished) {
+          GwOutput(input, trial.nextTurn())
         }
       }.name("Running Trials")
       .flatMapWith { output =>
@@ -107,11 +104,17 @@ object GwExperiment {
     exp.tableEnv.executeSql("USE CATALOG multiverse") */
 
     s"""
+       | CREATE TEMPORARY VIEW `InputPlanes`
+       |    AS SELECT inputPlaneId, COUNT(*) AS inputPlaneTrialCount FROM GwTrialOutput WHERE isFinished=true
+       |      AND isTurnProlonged=false
+       |      GROUP BY inputPlaneId;
        | CREATE TABLE `SurvivalByLambda`
        |    (lambda DOUBLE, seedSurvivalChance DOUBLE, trials BIGINT, err DOUBLE, PRIMARY KEY (lambda) NOT ENFORCED)
        |    WITH($sinkWithClauseCommonPart, 'table-name' = 'SurvivalByLambda');
        | INSERT INTO SurvivalByLambda SELECT lambda, AVG(seedSurvivalChance), COUNT(*),
-       |   ERROR(seedSurvivalChance, $confidence) FROM GwTrialOutput WHERE isFinished=true AND isTurnProlonged=false
+       |   ERROR(seedSurvivalChance, $confidence) FROM GwTrialOutput INNER JOIN InputPlanes
+       |    ON GwTrialOutput.inputPlaneId = InputPlanes.inputPlaneId
+       |   WHERE isFinished=true AND isTurnProlonged=false AND inputPlaneTrialCount=21
        |   GROUP BY lambda;
        | CREATE TABLE `SeedPopulationByTurn`
        |    (lambda DOUBLE, turn BIGINT,seedPopulation DOUBLE,  err DOUBLE, trials BIGINT,
