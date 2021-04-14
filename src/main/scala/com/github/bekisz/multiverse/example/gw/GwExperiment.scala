@@ -26,6 +26,26 @@ case class GwInput(
                   ) extends Input
 
 
+trait OutputHasInputPlanes extends OutputHasLastTrialOutput {
+  def inputPlaneId: Long
+}
+
+trait OutputHasMultipleTurns extends Output {
+  def turn: Long
+
+  def isFinished: Boolean
+}
+
+trait OutputHasProlongedTurns extends OutputHasMultipleTurns with OutputHasLastTrialOutput {
+  def prolongTrialsTill: Long = 50
+
+  def isTurnProlonged: Boolean
+}
+
+trait OutputHasLastTrialOutput extends Output {
+  def isLastTrialOutput: Boolean
+}
+
 /**
  * These fields are the variables that we save from the trial instances for later analysis and will be the columns
  * in our SQL table (Dataset[GwOutput])
@@ -33,16 +53,21 @@ case class GwInput(
 
 case class GwOutput(lambda: Double,
                     maxPopulation: Long,
-                    inputPlaneId:Long,
                     seedSurvivalChance: Double,
                     turn: Long,
-                    isTurnProlonged: Boolean,
-                    isFinished: Boolean,
                     nrOfSeedNodes: Int,
-                    trialUniqueId: String) extends Output
+                    trialUniqueId: String,
+                    override val prolongTrialsTill: Long = 44,
+                    isFinished: Boolean,
+                    isTurnProlonged: Boolean,
+                    inputPlaneId: Long,
+                    isLastTrialOutput: Boolean = false) extends Output
+  with OutputHasMultipleTurns
+  with OutputHasInputPlanes
+  with OutputHasProlongedTurns
 
 object GwOutput extends Output {
-  def apply(i:GwInput, t: GwTrial): GwOutput = new GwOutput(
+  def apply(i: GwInput, t: GwTrial): GwOutput = new GwOutput(
     lambda = i.lambda,
     maxPopulation = i.maxPopulation,
     inputPlaneId = i.inputPlaneId,
@@ -64,7 +89,6 @@ object GwOutput extends Output {
 object GwExperiment {
 
   val confidence = 0.999
-  val prolongTrialsTill = 50
   val sinkWithClauseCommonPart =
     """'connector'= 'jdbc', 'url'= 'jdbc:postgresql://localhost:5432/replicator',
   'username'='multiverse', 'password'='multiverse'"""
@@ -77,11 +101,11 @@ object GwExperiment {
     val gwTrialOutput = exp.env
       .addSource(new IdGenerator).name("Generate InputPlaneIDs")
       .mapWith { inputPlaneId =>
-        GwInput(inputPlaneId=inputPlaneId)
+        GwInput(inputPlaneId = inputPlaneId)
       }.name("Creating Input Planes")
       .flatMapWith {
         _.createInputPermutations()
-      }.name("Create Trial Inputs")
+      }.name("Creating Trial Inputs")
       .mapWith {
         case input: GwInput =>
           (input, new GwTrial(input.maxPopulation, seedNode = new GwNode(input.lambda)))
@@ -91,11 +115,37 @@ object GwExperiment {
           GwOutput(input, trial.nextTurn())
         }
       }.name("Running Trials")
-      .flatMapWith { output =>
-        if (output.isFinished && prolongTrialsTill > output.turn)
-          for (i <- output.turn to prolongTrialsTill) yield output.copy(turn = i, isTurnProlonged = i > output.turn)
-        else Seq(output)
-      }.name("Prolong Trial Turns")
+      .mapWith {
+        case output: OutputHasLastTrialOutput if output.isFinished => output.copy(isLastTrialOutput = true)
+        case output => output
+      }.name("Marking Last Trial Output")
+      .flatMapWith {
+        case output: OutputHasProlongedTurns =>
+          if (output.isFinished)
+            if (output.prolongTrialsTill > output.turn) {
+              for (i <- output.turn to output.prolongTrialsTill) yield output.copy(turn = i, isTurnProlonged = i > output.turn,
+                isLastTrialOutput = i == output.prolongTrialsTill)
+            } else Seq(output.copy(isLastTrialOutput = true))
+          else Seq(output)
+        case output => Seq(output)
+      }.name("Prolonging Trial Turns")
+      .keyBy(_.inputPlaneId)
+      .flatMapWithState {
+        (trialOutput, state: Option[(Long, Seq[Output])]) => {
+          trialOutput match {
+            case trialOutput: OutputHasInputPlanes =>
+              val (newFinishedTrials: Long, newEncounteredOutputs: Seq[GwOutput]) = state match {
+                case Some((oldFinishedTrials: Long, oldEncounteredOutputs: Seq[OutputHasInputPlanes]))
+                => (oldFinishedTrials + (if (trialOutput.isLastTrialOutput) 1 else 0), oldEncounteredOutputs :+ trialOutput)
+                case None => (0L, Seq(trialOutput))
+              }
+              if (newFinishedTrials == 21 ) (newEncounteredOutputs, None)
+              else (Seq.empty, Option((newFinishedTrials, newEncounteredOutputs)))
+
+            case trialOutput => (Seq(trialOutput), state)
+          }
+        }
+      }.name("Collating Input Plane")
 
     exp.tableEnv.createTemporaryView("GwTrialOutput", gwTrialOutput)
     /*
@@ -104,17 +154,12 @@ object GwExperiment {
     exp.tableEnv.executeSql("USE CATALOG multiverse") */
 
     s"""
-       | CREATE TEMPORARY VIEW `InputPlanes`
-       |    AS SELECT inputPlaneId, COUNT(*) AS inputPlaneTrialCount FROM GwTrialOutput WHERE isFinished=true
-       |      AND isTurnProlonged=false
-       |      GROUP BY inputPlaneId;
        | CREATE TABLE `SurvivalByLambda`
        |    (lambda DOUBLE, seedSurvivalChance DOUBLE, trials BIGINT, err DOUBLE, PRIMARY KEY (lambda) NOT ENFORCED)
        |    WITH($sinkWithClauseCommonPart, 'table-name' = 'SurvivalByLambda');
        | INSERT INTO SurvivalByLambda SELECT lambda, AVG(seedSurvivalChance), COUNT(*),
-       |   ERROR(seedSurvivalChance, $confidence) FROM GwTrialOutput INNER JOIN InputPlanes
-       |    ON GwTrialOutput.inputPlaneId = InputPlanes.inputPlaneId
-       |   WHERE isFinished=true AND isTurnProlonged=false AND inputPlaneTrialCount=21
+       |   ERROR(seedSurvivalChance, $confidence) FROM GwTrialOutput
+       |   WHERE isFinished=true AND isTurnProlonged=false
        |   GROUP BY lambda;
        | CREATE TABLE `SeedPopulationByTurn`
        |    (lambda DOUBLE, turn BIGINT,seedPopulation DOUBLE,  err DOUBLE, trials BIGINT,
@@ -124,7 +169,7 @@ object GwExperiment {
        |      avg(CAST(nrOfSeedNodes AS DOUBLE)) as seedPopulation,
        |      error(nrOfSeedNodes, $confidence) as error,
        |       COUNT(*) as trials
-       |      from GwTrialOutput where turn <= $prolongTrialsTill group by lambda, turn"""
+       |      from GwTrialOutput where turn <= prolongTrialsTill group by lambda, turn"""
       .stripMargin.split(';').map(exp.tableEnv.executeSql(_))
 
 
