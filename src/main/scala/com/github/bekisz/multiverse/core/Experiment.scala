@@ -17,7 +17,7 @@ class Experiment extends HasMeasuredLifeTime {
     val configuration = tableEnv.getConfig.getConfiguration
     // local-global aggregation depends on mini-batch is enabled
     configuration.setString("table.exec.mini-batch.enabled", "true")
-    configuration.setString("table.exec.mini-batch.allow-latency", "1s")
+    configuration.setString("table.exec.mini-batch.allow-latency", "2s")
     configuration.setString("table.exec.mini-batch.size", "1000000")
     // enable two-phase, i.e. local-global aggregation
     configuration.setString("table.optimizer.agg-phase-strategy", "TWO_PHASE")

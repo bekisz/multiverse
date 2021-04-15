@@ -16,8 +16,9 @@ import scala.collection.immutable
  * @param seedNode the initial node the is the subject of our enquiry
  */
 class GwTrial( val maxPopulation:Long= 100, val seedNode:GwNode = new GwNode(lambdaForPoisson = 1.0))
-  extends Trial with  Serializable
+  extends com.github.bekisz.multiverse.core.Trial  with Serializable
 {
+
   var livingNodes:immutable.List[GwNode]= seedNode :: immutable.List[GwNode]()
 
   private var _isSeedDominant = false

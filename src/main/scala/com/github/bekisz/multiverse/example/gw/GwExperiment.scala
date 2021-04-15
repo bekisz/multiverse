@@ -20,7 +20,7 @@ import org.apache.flink.streaming.api.scala.extensions.acceptPartialFunctions
  */
 case class GwInput(
                     inputPlaneId: Parameter[Long],
-                    lambda: Parameter[Double] = ("1.0".toBD to "2.0".toBD by "0.05".toBD).map(_.toDouble),
+                    lambda: Parameter[Double] = ("1.0".toBD to "2.0".toBD by "0.08".toBD).map(_.toDouble),
                     maxPopulation: Parameter[Long] = Seq(100L)
 
                   ) extends Input
@@ -28,6 +28,7 @@ case class GwInput(
 
 trait OutputHasInputPlanes extends OutputHasLastTrialOutput {
   def inputPlaneId: Long
+  def trialsInInputPlane :Long
 }
 
 trait OutputHasMultipleTurns extends Output {
@@ -61,16 +62,18 @@ case class GwOutput(lambda: Double,
                     isFinished: Boolean,
                     isTurnProlonged: Boolean,
                     inputPlaneId: Long,
+                    trialsInInputPlane :Long,
                     isLastTrialOutput: Boolean = false) extends Output
   with OutputHasMultipleTurns
   with OutputHasInputPlanes
   with OutputHasProlongedTurns
 
 object GwOutput extends Output {
-  def apply(i: GwInput, t: GwTrial): GwOutput = new GwOutput(
+  def apply(experimentInput: GwInput, i: GwInput, t: GwTrial): GwOutput = new GwOutput(
     lambda = i.lambda,
     maxPopulation = i.maxPopulation,
     inputPlaneId = i.inputPlaneId,
+    trialsInInputPlane = experimentInput.multiplicity(),
     seedSurvivalChance = if (t.isSeedDominant) 1.0 else 0.0,
     turn = t.turn(),
     isTurnProlonged = false,
@@ -103,17 +106,18 @@ object GwExperiment {
       .mapWith { inputPlaneId =>
         GwInput(inputPlaneId = inputPlaneId)
       }.name("Creating Input Planes")
-      .flatMapWith {
-        _.createInputPermutations()
+      .flatMapWith { experimentInput =>
+        experimentInput.createInputPermutations().map(trailInput => (experimentInput, trailInput))
       }.name("Creating Trial Inputs")
       .mapWith {
-        case input: GwInput =>
-          (input, new GwTrial(input.maxPopulation, seedNode = new GwNode(input.lambda)))
+        case (experimentInput: GwInput, trailInput: GwInput) =>
+          (experimentInput, trailInput, new GwTrial(trailInput.maxPopulation, seedNode = new GwNode(trailInput.lambda)))
       }.name("Creating Trials")
       .flatMapWith {
-        case (input, trial) => List(GwOutput(input, trial)) ++ While.withYield(!trial.isFinished) {
-          GwOutput(input, trial.nextTurn())
-        }
+        case (experimentInput, trailInput, trial) => List(GwOutput(experimentInput, trailInput, trial)) ++
+          While.withYield(!trial.isFinished) {
+            GwOutput(experimentInput, trailInput, trial.nextTurn())
+          }
       }.name("Running Trials")
       .mapWith {
         case output: OutputHasLastTrialOutput if output.isFinished => output.copy(isLastTrialOutput = true)
@@ -136,10 +140,11 @@ object GwExperiment {
             case trialOutput: OutputHasInputPlanes =>
               val (newFinishedTrials: Long, newEncounteredOutputs: Seq[GwOutput]) = state match {
                 case Some((oldFinishedTrials: Long, oldEncounteredOutputs: Seq[OutputHasInputPlanes]))
-                => (oldFinishedTrials + (if (trialOutput.isLastTrialOutput) 1 else 0), oldEncounteredOutputs :+ trialOutput)
+                  => (oldFinishedTrials + (if (trialOutput.isLastTrialOutput) 1 else 0),
+                    oldEncounteredOutputs :+ trialOutput)
                 case None => (0L, Seq(trialOutput))
               }
-              if (newFinishedTrials == 21 ) (newEncounteredOutputs, None)
+              if (trialOutput.trialsInInputPlane == newFinishedTrials ) (newEncounteredOutputs, None)
               else (Seq.empty, Option((newFinishedTrials, newEncounteredOutputs)))
 
             case trialOutput => (Seq(trialOutput), state)
@@ -170,7 +175,7 @@ object GwExperiment {
        |      error(nrOfSeedNodes, $confidence) as error,
        |       COUNT(*) as trials
        |      from GwTrialOutput where turn <= prolongTrialsTill group by lambda, turn"""
-      .stripMargin.split(';').map(exp.tableEnv.executeSql(_))
+      .stripMargin.split(';').map(exp.tableEnv.executeSql)
 
 
     exp.env.execute("Galton-Watson Experiment")

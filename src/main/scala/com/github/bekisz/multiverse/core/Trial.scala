@@ -9,7 +9,7 @@ import java.util.UUID
  *
  * All Trials subclasses inherit an universal unique ID
  */
-trait Trial extends Serializable  {
+abstract class Trial extends Serializable  {
 
   private var _turn = 0L
   def hasNext:Boolean = !this.isFinished
